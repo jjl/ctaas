@@ -1,83 +1,53 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 
-module Main where
+module Main (main) where
 
 import           Data.ByteString
 import           Data.ByteString.Lazy as L (toStrict)
 -- import qualified Data.ByteString.Char8 as C8
-import           Data.Hashable
 import           Control.Applicative
 import qualified Control.Concurrent.Map as M
 import           Control.Monad.IO.Class
-import           GHC.Generics (Generic)
 import           Snap.Core
 import           Snap.Http.Server
 
-data Key a = Key(a, a) deriving (Eq, Generic)
-instance Hashable a => Hashable (Key a)
-
 type StringMap = M.Map ByteString ByteString
 
--- 64MB ought to be big enough for now
+-- self-explanatory name. 64MB ought to be big enough for now
 max_body_size = 1024 * 1024 * 64
 
-get' :: Snap () -> Snap ()
-get' a = method GET a
-post' :: Snap () -> Snap ()
-post' a = method POST a
-del' :: Snap () -> Snap ()
-del' a = method DELETE a
+-- Entry
 
 main :: IO ()
-main = do theMap <- (M.empty :: IO StringMap)
-          quickHttpServe $ site theMap
+main = (M.empty :: IO StringMap) >>= \m -> quickHttpServe $ site m
 
-site :: StringMap ->  Snap ()
-site m = pathArg $ \k -> (handler k m) <|> invalidRequest
+-- Handlers
 
-handler :: ByteString -> StringMap -> Snap ()
-handler k m = do getKeyHandler k m <|>
-                      postKeyHandler k m <|>
-                      delKeyHandler k m <|>
-                      invalidRequest
+site m = getRequest >>= \r -> (handler (rqURI r) m) <|> invalidRequest
 
-getKeyHandler :: ByteString -> StringMap -> Snap ()
+handler k m = getKeyHandler k m <|> postKeyHandler k m <|>
+                delKeyHandler k m <|> invalidRequest
+
 getKeyHandler k m = get' $ getKey k m
+delKeyHandler k m = del' $ delKey k m
+postKeyHandler k m = post' $ readRequestBody max_body_size >>=
+                             \b -> putKey k (toStrict b) m
 
-postKeyHandler :: ByteString -> StringMap -> Snap ()
-postKeyHandler k m = post' $ do body <- readRequestBody max_body_size
-                                putKey k (toStrict body) m
+-- Wrappers over the ctrie
 
-delKeyHandler :: ByteString -> StringMap -> Snap ()
-delKeyHandler k m = del' $ do liftIO $ M.delete k m
-                              writeBS $ append "Key Deleted" k
+getKey k m = (liftIO $ M.lookup k m) >>= \v ->maybe (notFound k) writeBS v
+delKey k m = (liftIO $ M.delete k m) >> noContent
+putKey k v m = (liftIO $ M.insert k v m) >> created
 
-getKey :: ByteString -> StringMap -> Snap ()
-getKey k m = do v <- liftIO $ M.lookup k m
-                maybe (notFound k) writeBS v
+-- Helpers
 
-putKey :: ByteString -> ByteString -> StringMap -> Snap ()
-putKey k v m = do liftIO $ M.insert k v m
-                  created
+get' a = method GET a
+post' a = method POST a
+del' a = method DELETE a
 
-delKey :: ByteString -> StringMap -> Snap ()
-delKey k m = do liftIO $ M.delete k m
-                noContent
-
-notFound :: ByteString -> Snap ()
-notFound a = do modifyResponse (setResponseCode 404)
-                writeBS $ append "Not Found: " a
-
-invalidRequest :: Snap ()
-invalidRequest = do modifyResponse (setResponseCode 400)
-                    writeBS "Invalid Request"
-
-noContent :: Snap ()
-noContent = do modifyResponse (setResponseCode 204)
-               writeBS "No Content"
-
-created :: Snap ()
-created = do modifyResponse (setResponseCode 201)
-             writeBS "Created"
-
+notFound a = status 404 >> (writeBS $ append "Not Found: " a)
+invalidRequest = status 400 >> writeBS "Invalid Request"
+noContent = status 204 >> writeBS "No Content"
+created = status 201 >> writeBS "Created"
+status = modifyResponse . setResponseCode
